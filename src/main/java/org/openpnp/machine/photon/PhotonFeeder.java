@@ -381,12 +381,7 @@ public class PhotonFeeder extends ReferenceFeeder {
     }
 
     private void feed(Nozzle nozzle, int distance_mm) throws Exception {
-        final int maxRetry = photonProperties.getFeederCommunicationMaxRetry();
-        retryloop: for (int i = 0; true; i++) {
-            if (i > maxRetry) {
-                throw new FeedFailureException("Failed to feed for an unknown reason. Is the feeder inserted?");
-            }
-
+        for (int i = 0; i <= photonProperties.getFeederCommunicationMaxRetry(); i++) {
             findSlotAddressIfNeeded();
             initializeIfNeeded();
 
@@ -396,6 +391,7 @@ public class PhotonFeeder extends ReferenceFeeder {
 
             verifyFeederLocationIsFullyConfigured();
 
+            // Move the tape forwards
             MoveFeedForward moveFeedForward = new MoveFeedForward(slotAddress, distance_mm * 10);
             MoveFeedForward.Response moveFeedForwardResponse = moveFeedForward.send(photonBus);
 
@@ -409,6 +405,24 @@ public class PhotonFeeder extends ReferenceFeeder {
                 continue;  // We'll initialize it on a retry
             }
 
+            // Moving the tape forward implies that if the part pitch is different
+            // than the holePitch, then the linear distance between the hole and the
+            // part would change. In most cases this is a multiple and this code
+            // would be a no-op, but for cases where it is not, such as 0402, this
+            // would alternate between 2 part pitches.
+            holeToPartLinear = holeToPartLinear
+                .add(new Length(this.partPitch, LengthUnit.Millimeters))
+                .modulo(holePitch);
+
+            // After moving the tape, if vision is enabled, update the offset based
+            // on vision.
+            try {
+                updateVisionOffsets(nozzle);
+            } catch (final Exception e) {
+                // We can continue w/o vision if vision failed.
+                Logger.error(e, "Using vision after feeding failed");
+            }
+
             // The feeder gives us expectedTimeToFeed, but it is way too conservative.
             // Use expectedTimeToFeed to bound how long we will wait,
             // but use polling to check the status of the feed.
@@ -418,6 +432,7 @@ public class PhotonFeeder extends ReferenceFeeder {
                 Thread.sleep(50); // MAGIC: this feels like a good number, there is no particular reason it is this way.
 
                 if (j == 0 && nozzle != null && Configuration.get().getMachine().isHomed() && getMoveWhileFeeding()) {
+                    // move the nozzle over the feed location
                     MovableUtils.moveToLocationAtSafeZ(nozzle, getPickLocation().deriveLengths(null, null, nozzle.getEffectiveSafeZ(), null));
                 }
 
@@ -429,7 +444,7 @@ public class PhotonFeeder extends ReferenceFeeder {
                 }
 
                 if (moveFeedStatusResponse.error == ErrorTypes.NONE) {
-                    break retryloop;
+                    return;
                 } else if (moveFeedStatusResponse.error == ErrorTypes.COULD_NOT_REACH) {
                     throw new FeedFailureException("Feeder could not reach its destination.");
                 }
@@ -438,24 +453,7 @@ public class PhotonFeeder extends ReferenceFeeder {
             throw new FeedFailureException("Feeder timed out when we requested a feed status update.");
         }
 
-        // Moving the tape forward implies that if the part pitch is different
-        // than the holePitch, then the linear distance between the hole and the
-        // part would change. In most cases this is a multiple and this code
-        // would be a no-op, but for cases where it is not, such as 0402, this
-        // would alternate between 2 part pitches.
-        holeToPartLinear = holeToPartLinear
-            .add(new Length(this.partPitch, LengthUnit.Millimeters))
-            .modulo(holePitch);
-
-        // If Vision is disabled, then rely on the registered pick location,
-        // otherwise use vision to detect the tape hole location offset and use
-        // that as a mean to compensate the variance in positioning.
-        try {
-            updateVisionOffsets(nozzle);
-        } catch (final Exception e) {
-            // We can continue w/o vision if vision failed.
-            Logger.error(e, "Using vision after feeding failed");
-        }
+        throw new FeedFailureException("Failed to feed for an unknown reason. Is the feeder inserted?");
     }
 
     private void updateVisionOffsets(final Nozzle nozzle) throws Exception {
@@ -494,7 +492,13 @@ public class PhotonFeeder extends ReferenceFeeder {
         }
 
         // Normalize the tapeVector.
-        tapeVector = Location.origin.unitVectorTo(tapeVector);
+        // If the offset was 0, the “normalized” version would be NaN. If we instead keep
+        // it at 0, the math operations below (rotation/multiplication) will keep it at
+        // 0, which is better than NaN. (Due to the above multiplication, only x or y can
+        // be non-zero).
+        if (tapeVector.getX() != 0.0 || tapeVector.getY() != 0.0) {
+            tapeVector = Location.origin.unitVectorTo(tapeVector);
+        }
 
         // Compute the hole location based on the tapeVector and pick location.
         final Location lateralVector = tapeVector
@@ -527,10 +531,10 @@ public class PhotonFeeder extends ReferenceFeeder {
             throw new Exception("Located hole is too far.");
         }
 
-        // Record the position difference between the expected hole location and the actual hole
-        // location. Any deviations would be used when locating the next hole, or when locating the
-        // next part. The difference is added to the vision offset which was used previously to
-        // compute the pick location.
+        // Record the position difference between the expected hole location and the
+        // actual hole location. Any deviations would be used when locating the next
+        // hole, or when locating the next part. The difference is added to the vision
+        // offset which was used previously to compute the pick location.
         visionOffset = visionOffset.add(actualLocation.subtract(expectedLocation));
 
         // Record the last vision offset in the log used to compute the
