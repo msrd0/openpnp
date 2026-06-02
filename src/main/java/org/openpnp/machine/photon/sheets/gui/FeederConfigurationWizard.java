@@ -53,8 +53,8 @@ public class FeederConfigurationWizard extends AbstractConfigurationWizard {
 	private final JTextField partPitchTf;
 	private final JTextField feedRetryCountTf;
 	private final JTextField pickRetryCountTf;
-	private final JLabel useVisionLabel;
 	private final JCheckBox useVisionCheckbox;
+	private final JCheckBox usePartVisionCheckbox;
 	private final JTextField varianceHistoryTf;
 	private final JTextField skippedCalibrationTf;
 	private final JTextField xSlotTf;
@@ -186,13 +186,17 @@ public class FeederConfigurationWizard extends AbstractConfigurationWizard {
 				FormSpecs.RELATED_GAP_ROWSPEC, FormSpecs.DEFAULT_ROWSPEC,
 				FormSpecs.RELATED_GAP_ROWSPEC, FormSpecs.DEFAULT_ROWSPEC,
 				FormSpecs.RELATED_GAP_ROWSPEC, FormSpecs.DEFAULT_ROWSPEC,
+				FormSpecs.RELATED_GAP_ROWSPEC, FormSpecs.DEFAULT_ROWSPEC,
+				FormSpecs.RELATED_GAP_ROWSPEC, FormSpecs.DEFAULT_ROWSPEC,
 			}
 		));
 
-		useVisionLabel = new JLabel(Translations.getString("FeederConfigurationWizard.VisionPanel.useVisionLabel.text"));
+		final JLabel useVisionLabel = new JLabel(
+			Translations.getString("FeederConfigurationWizard.VisionPanel.useVisionLabel.text")
+		);
 		visionPanel.add(useVisionLabel, "2, 2");
 
-		useVisionCheckbox = new JCheckBox("");
+		useVisionCheckbox = new JCheckBox();
 		visionPanel.add(useVisionCheckbox, "4, 2");
 
 		final JButton editPipelineButton = new JButton(editPipelineAction);
@@ -201,22 +205,36 @@ public class FeederConfigurationWizard extends AbstractConfigurationWizard {
 		final JButton resetPipelineButton = new JButton(resetPipelineAction);
 		visionPanel.add(resetPipelineButton, "4, 4");
 
+		final JLabel usePartVisionLabel = new JLabel(
+			Translations.getString("FeederConfigurationWizard.VisionPanel.usePartVisionLabel.text")
+		);
+		visionPanel.add(usePartVisionLabel, "2, 6");
+
+		usePartVisionCheckbox = new JCheckBox();
+		visionPanel.add(usePartVisionCheckbox, "4, 6");
+
+		final JButton editPartPipelineButton = new JButton(editPartPipelineAction);
+		visionPanel.add(editPartPipelineButton, "2, 8");
+
+		final JButton resetPartPipelineButton = new JButton(resetPartPipelineAction);
+		visionPanel.add(resetPartPipelineButton, "4, 8");
+
 		final JLabel varianceHistoryLabel = new JLabel(
 			Translations.getString("FeederConfigurationWizard.VisionPanel.varianceHistoryLabel.text")
 		);
-		visionPanel.add(varianceHistoryLabel, "2, 6, right, default");
+		visionPanel.add(varianceHistoryLabel, "2, 10, right, default");
 
 		varianceHistoryTf = new JTextField();
-		visionPanel.add(varianceHistoryTf, "4, 6, fill, default");
+		visionPanel.add(varianceHistoryTf, "4, 10, fill, default");
 		varianceHistoryTf.setColumns(10);
 
 		final JLabel skippedCalibrationLabel = new JLabel(
 			Translations.getString("FeederConfigurationWizard.VisionPanel.skippedCalibrationLabel.text")
 		);
-		visionPanel.add(skippedCalibrationLabel, "2, 8, right, default");
+		visionPanel.add(skippedCalibrationLabel, "2, 12, right, default");
 
 		skippedCalibrationTf = new JTextField();
-		visionPanel.add(skippedCalibrationTf, "4, 8, fill, default");
+		visionPanel.add(skippedCalibrationTf, "4, 12, fill, default");
 		skippedCalibrationTf.setColumns(10);
 
 		JPanel locationPanel = new JPanel();
@@ -343,6 +361,7 @@ public class FeederConfigurationWizard extends AbstractConfigurationWizard {
 		addWrappedBinding(feeder, "feedRetryCount", feedRetryCountTf, "text", intConverter); //$NON-NLS-1$ //$NON-NLS-2$
 		addWrappedBinding(feeder, "pickRetryCount", pickRetryCountTf, "text", intConverter); //$NON-NLS-1$ //$NON-NLS-2$
 		addWrappedBinding(feeder, "visionEnabled", useVisionCheckbox, "selected");
+		addWrappedBinding(feeder, "partVisionEnabled", usePartVisionCheckbox, "selected");
 		addWrappedBinding(feeder, "varianceHistory", varianceHistoryTf, "text", intConverter);
 		addWrappedBinding(feeder, "skippedCalibration", skippedCalibrationTf, "text", intConverter);
 
@@ -425,6 +444,26 @@ public class FeederConfigurationWizard extends AbstractConfigurationWizard {
 		}
 	};
 
+	private final Action editPartPipelineAction = new AbstractAction(Translations.getString("FeederConfigurationWizard.VisionPanel.editPartPipelineAction.text")) {
+		@Override
+		public void actionPerformed(final ActionEvent e) {
+			UiUtils.messageBoxOnException(() -> {
+				final Camera camera = Configuration.get().getMachine().getDefaultHead().getDefaultCamera();
+				final CvPipeline partPipeline = getCvPartPipeline(camera, false);
+				final CvPipelineEditor editor = new CvPipelineEditor(partPipeline);
+				final JDialog dialog = new CvPipelineEditorDialog(MainFrame.get(), feeder.getName() + " Part Pipeline", editor);
+				dialog.setVisible(true);
+			});
+		}
+	};
+
+	private final Action resetPartPipelineAction = new AbstractAction(Translations.getString("FeederConfigurationWizard.VisionPanel.resetPartPipelineAction.text")) {
+		@Override
+		public void actionPerformed(final ActionEvent e) {
+			feeder.resetPartPipeline();
+		}
+	};
+
 	private CvPipeline getCvPipeline(final Camera camera, final boolean clone) {
 		final Integer pxMaxDistance = (int) VisionUtils.toPixels(feeder.getHolePitch(), camera);
 		final Integer pxMinDiameter = (int) VisionUtils.toPixels(feeder.getHoleDiameterMin(), camera);
@@ -436,12 +475,26 @@ public class FeederConfigurationWizard extends AbstractConfigurationWizard {
 				pipeline = pipeline.clone();
 			}
 			pipeline.setProperty("camera", camera);
-			pipeline.setProperty("feeder", this);
+			pipeline.setProperty("feeder", feeder);
 			pipeline.setProperty("DetectCircularSymmetry.maxDistance", pxMaxDistance / 2);
 			pipeline.setProperty("DetectCircularSymmetry.minDiameter", pxMinDiameter);
 			pipeline.setProperty("DetectCircularSymmetry.maxDiameter", pxMaxDiameter);
 			pipeline.setProperty("DetectCircularSymmetry.searchHeight", pxMaxDistance);
 			pipeline.setProperty("DetectCircularSymmetry.searchWidth", pxMinDiameter / 2);
+			return pipeline;
+		} catch (final CloneNotSupportedException e) {
+			throw new Error(e);
+		}
+	}
+
+	private CvPipeline getCvPartPipeline(final Camera camera, final boolean clone) {
+		try {
+			CvPipeline pipeline = feeder.getPartPipeline();
+			if (clone) {
+				pipeline = pipeline.clone();
+			}
+			pipeline.setProperty("camera", camera);
+			pipeline.setProperty("feeder", feeder);
 			return pipeline;
 		} catch (final CloneNotSupportedException e) {
 			throw new Error(e);

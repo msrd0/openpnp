@@ -1,6 +1,7 @@
 package org.openpnp.machine.photon;
 
 import org.apache.commons.io.IOUtils;
+import org.opencv.core.RotatedRect;
 import org.openpnp.ConfigurationListener;
 import org.openpnp.gui.MainFrame;
 import org.openpnp.gui.support.Wizard;
@@ -62,6 +63,9 @@ public class PhotonFeeder extends ReferenceFeeder {
     private boolean visionEnabled = false;
 
     @Attribute(required = false)
+    private boolean partVisionEnabled = false;
+
+    @Attribute(required = false)
     private int varianceHistory = 20;
     private ArrayList<Location> visionOffsetLog = null;
     private boolean updateVisionOffset = true;
@@ -74,6 +78,9 @@ public class PhotonFeeder extends ReferenceFeeder {
     @Element(required = false)
     private CvPipeline pipeline = createDefaultPipeline();
 
+    @Element(required = false)
+    private CvPipeline partPipeline = createDefaultPartPipeline();
+
     /** Offset of the picking location, deduced using vision. */
     private Location visionOffset = new Location(LengthUnit.Millimeters);
 
@@ -81,8 +88,6 @@ public class PhotonFeeder extends ReferenceFeeder {
 
     /** Spacing between 2 holes in the tape. By default, holes are 4mm apart. */
     private Length holePitch = new Length(4, LengthUnit.Millimeters);
-
-    private Length partHoleOffset = new Length(2, LengthUnit.Millimeters);
 
     /**
      * Offset from the part to the hole along the axis of the tape. This value would
@@ -530,12 +535,33 @@ public class PhotonFeeder extends ReferenceFeeder {
         if (distance.getValue() > 2) {
             throw new Exception("Located hole is too far.");
         }
+        Logger.info("PhotonFeeder Vision: distance is " + distance.getValue() + "mm");
 
         // Record the position difference between the expected hole location and the
         // actual hole location. Any deviations would be used when locating the next
         // hole, or when locating the next part. The difference is added to the vision
         // offset which was used previously to compute the pick location.
         visionOffset = visionOffset.add(actualLocation.subtract(expectedLocation));
+
+        // If enabled, do another vision, this time for the part on the tape
+        if (partVisionEnabled) {
+            final Location expectedPartLocation = getPickLocation();
+            MovableUtils.moveToLocationAtSafeZ(camera, expectedPartLocation);
+            final Location actualPartLocation = findClosestPart(camera);
+
+            // make sure it's not too far away. The feeder should only move by increments of 4
+            // millimeters, and the camera is not supposed to scan beyond.
+            final Length partDistance = actualPartLocation.getLinearLengthTo(expectedPartLocation)
+                    .convertToUnits(LengthUnit.Millimeters);
+            if (partDistance.getValue() > 2) {
+                throw new Exception("Located hole is too far (" + partDistance.getValue() + "mm > 2mm)");
+            }
+            Logger.info("PhotonFeeder Vision: part distance is " + partDistance.getValue() + "mm");
+
+            // Record the position difference between the expected part location and the
+            // actual part location.
+            visionOffset = visionOffset.add(actualPartLocation.subtract(expectedPartLocation));
+        }
 
         // Record the last vision offset in the log used to compute the
         // variance.
@@ -574,6 +600,7 @@ public class PhotonFeeder extends ReferenceFeeder {
         }
     }
 
+    /** Use computer vision to find the closest hole in the tape to the camera. */
     private Location findClosestHole(Camera camera) throws Exception {
         final Integer pxMaxDistance = (int) VisionUtils.toPixels(getHolePitch(), camera);
         final Integer pxMinDiameter = (int) VisionUtils.toPixels(getHoleDiameterMin(), camera);
@@ -611,6 +638,33 @@ public class PhotonFeeder extends ReferenceFeeder {
             // Return the only hole in the search window.
             final CvStage.Result.Circle closestResult = results.get(0);
             return VisionUtils.getPixelLocation(camera, closestResult.x, closestResult.y);
+        }
+    }
+
+    /** Use computer vision to detect the closest part in the tape to the camera. */
+    private Location findClosestPart(Camera camera) throws Exception {
+        try (final CvPipeline partPipeline = getPartPipeline()) {
+            partPipeline.setProperty("camera", camera);
+            partPipeline.setProperty("feeder", this);
+            partPipeline.process();
+
+            final MainFrame mainFrame = MainFrame.get();
+            if (mainFrame != null) {
+                try {
+                    mainFrame.getCameraViews().getCameraView(camera)
+                        .showFilteredImage(OpenCvUtils.toBufferedImage(partPipeline.getWorkingImage()), 250);
+                }
+                catch (Exception e) {
+                    // if we aren't running in the UI this will fail, and that's okay
+                }
+            }
+
+            // Grab the results
+            final RotatedRect result = partPipeline.getExpectedResult(VisionUtils.PIPELINE_RESULTS_NAME)
+                    .getExpectedModel(RotatedRect.class);
+
+            // Return the part in the search window.
+            return VisionUtils.getPixelLocation(camera, result.center.x, result.center.y);
         }
     }
 
@@ -801,6 +855,14 @@ public class PhotonFeeder extends ReferenceFeeder {
         return visionEnabled;
     }
 
+    public void setPartVisionEnabled(boolean enable) {
+        this.partVisionEnabled = enable;
+    }
+
+    public boolean getPartVisionEnabled() {
+        return this.partVisionEnabled;
+    }
+
     public void setVarianceHistory(int varianceHistory) {
         this.varianceHistory = varianceHistory;
         resetVision();
@@ -953,6 +1015,26 @@ public class PhotonFeeder extends ReferenceFeeder {
             return new CvPipeline(xml);
         }
         catch (Exception e) {
+            throw new Error(e);
+        }
+    }
+
+    public CvPipeline getPartPipeline() {
+        return this.partPipeline;
+    }
+
+    public void resetPartPipeline() {
+        this.partPipeline = createDefaultPartPipeline();
+    }
+
+    private static CvPipeline createDefaultPartPipeline() {
+        try {
+            final String xml = IOUtils.toString(
+                PhotonFeeder.class.getResource("PhotonFeeder-DefaultPartPipeline.xml"),
+                Charset.forName("UTF-8")
+            );
+            return new CvPipeline(xml);
+        } catch (final Exception e) {
             throw new Error(e);
         }
     }
