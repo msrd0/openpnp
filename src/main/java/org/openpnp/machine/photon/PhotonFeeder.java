@@ -319,7 +319,7 @@ public class PhotonFeeder extends ReferenceFeeder {
         setSlotAddress(response.fromAddress);
     }
 
-    private void findSlotAddressIfNeeded() throws Exception {
+    public void findSlotAddressIfNeeded() throws Exception {
         findSlotAddress(false);
     }
 
@@ -415,9 +415,7 @@ public class PhotonFeeder extends ReferenceFeeder {
             // part would change. In most cases this is a multiple and this code
             // would be a no-op, but for cases where it is not, such as 0402, this
             // would alternate between 2 part pitches.
-            holeToPartLinear = holeToPartLinear
-                .add(new Length(this.partPitch, LengthUnit.Millimeters))
-                .modulo(holePitch);
+            advanceHoleToPartLinear();
 
             // After moving the tape, if vision is enabled, update the offset based
             // on vision.
@@ -461,7 +459,30 @@ public class PhotonFeeder extends ReferenceFeeder {
         throw new FeedFailureException("Failed to feed for an unknown reason. Is the feeder inserted?");
     }
 
-    private void updateVisionOffsets(final Nozzle nozzle) throws Exception {
+    /**
+     * Advance the hole to part linear. This should be caller every time the tape was
+     * moved. This method can also be used to fix any missalignment between the initial
+     * guess for the hole to part linear value and the actual situation in the feeder
+     * after the first visual inspection of the feeder.
+     */
+    private void advanceHoleToPartLinear() {
+        // Moving the tape forward implies that if the part pitch is different
+        // than the holePitch, then the linear distance between the hole and the
+        // part would change. In most cases this is a multiple and this code
+        // would be a no-op, but for cases where it is not, such as 0402, this
+        // would alternate between 2 part pitches.
+        holeToPartLinear = holeToPartLinear
+            .add(new Length(this.partPitch, LengthUnit.Millimeters))
+            .modulo(holePitch);
+    }
+
+    /**
+     * If vision is enabled, use vision to detect the holes in the tape for a more exact
+     * positioning of the tool over the feeder. If part vision is enabled, use vision
+     * again to find the exact position of the part after vision was used to find the
+     * hole.
+     */
+    public void updateVisionOffsets(final Nozzle nozzle) throws Exception {
         if (!visionEnabled || !updateVisionOffset) {
             return;
         }
@@ -481,7 +502,12 @@ public class PhotonFeeder extends ReferenceFeeder {
         final Location pickLocation = getPickLocation();
 
         // go to where we expect to find the next reference hole
-        final Camera camera = nozzle.getHead().getDefaultCamera();
+        final Camera camera;
+        if (nozzle != null) {
+            camera = nozzle.getHead().getDefaultCamera();
+        } else {
+            camera = Configuration.get().getMachine().getDefaultHead().getDefaultCamera();
+        }
 
         // Compute the orientation of the tape. This supposes that the
         // slot-location is in front of the picking location.
@@ -489,20 +515,20 @@ public class PhotonFeeder extends ReferenceFeeder {
 
         // Discard any miss alignment, and consider that the feeders are
         // perfectly aligned as a small miss-alignment would not cause much
-        // problems.
-        if (tapeVector.getLengthX().getValue() > tapeVector.getLengthY().getValue()) {
-            tapeVector = tapeVector.multiply(1, 0, 0, 0);
+        // problems. Also, normalise the vector at the same time.
+        if (tapeVector.getLengthX().abs().getValue() > tapeVector.getLengthY().abs().getValue()) {
+            tapeVector = new Location(LengthUnit.Millimeters, 0.0, 1.0, 0.0, 0.0);
         } else {
-            tapeVector = tapeVector.multiply(0, 1, 0, 0);
+            tapeVector = new Location(LengthUnit.Millimeters, 1.0, 0.0, 0.0, 0.0);
         }
 
-        // Normalize the tapeVector.
-        // If the offset was 0, the “normalized” version would be NaN. If we instead keep
-        // it at 0, the math operations below (rotation/multiplication) will keep it at
-        // 0, which is better than NaN. (Due to the above multiplication, only x or y can
-        // be non-zero).
-        if (tapeVector.getX() != 0.0 || tapeVector.getY() != 0.0) {
-            tapeVector = Location.origin.unitVectorTo(tapeVector);
+        // If the offset between the slot location and the part location is (0, 0), then
+        // we can infer that the calibration was done directly on the part location.
+        // Therefore, we set the tape vector to (0, 0, 0, 0), so that it doesn't change
+        // the location. The vision will likely fail unless the user is using round parts
+        // or has modified the pipeline themselves.
+        if (offset.getLengthX().getValue() == 0.0 && offset.getLengthY().getValue() == 0.0) {
+            tapeVector = new Location(LengthUnit.Millimeters, 0.0, 0.0, 0.0, 0.0);
         }
 
         // Compute the hole location based on the tapeVector and pick location.
@@ -510,22 +536,32 @@ public class PhotonFeeder extends ReferenceFeeder {
             .rotateXy(90)
             .multiply(getHoleToPartLateral().getValue());
 
-        // For tapes with a part pitch >= 4 there is always a reference
-        // hole 2mm from a part so we just multiply by the part pitch
-        // skipping over holes that are not reference holes.
-        final Location backwardVector = tapeVector.multiply(-1 * holeToPartLinear.getValue());
+        Location expectedLocation = null;
+        Location actualLocation = null;
+        for (int i = 0; i < 2; i++) {
+            // For tapes with a part pitch >= 4 there is always a reference
+            // hole 2mm from a part so we just multiply by the part pitch
+            // skipping over holes that are not reference holes.
+            final Location backwardVector = tapeVector.multiply(-1 * holeToPartLinear.getValue());
 
-        // Location where the hole is expected to be found while pushing the
-        // tape forward.
-        final Location expectedLocation = pickLocation.add(lateralVector).add(backwardVector);
+            // Location where the hole is expected to be found while pushing the
+            // tape forward.
+            expectedLocation = pickLocation.add(lateralVector).add(backwardVector);
 
-        // Move the camera above the expected location for the hole.
-        MovableUtils.moveToLocationAtSafeZ(camera, expectedLocation);
+            // Move the camera above the expected location for the hole.
+            MovableUtils.moveToLocationAtSafeZ(camera, expectedLocation);
 
-        // and look for the hole
-        final Location actualLocation = findClosestHole(camera);
+            // and look for the hole
+            actualLocation = findClosestHole(camera);
+            if (actualLocation != null && this.partPitch != this.holePitch.getValue()) {
+                break;
+            }
+
+            // retry with a different value for the hole to part linear
+            advanceHoleToPartLinear();
+        }
         if (actualLocation == null) {
-            throw new Exception("Unable to locate reference hole. End of strip? Too close to the feeder window?");
+            throw new Exception("Feeder " + getName() + ": No tape holes found. End of strip? Too close to the feeder window?");
         }
 
         // make sure it's not too far away. The feeder should only move by increments of 4
@@ -564,7 +600,10 @@ public class PhotonFeeder extends ReferenceFeeder {
         }
 
         // Record the last vision offset in the log used to compute the
-        // variance.
+        // variance. But only if the history isn't set to 0.
+        if (varianceHistory <= 0) {
+            return;
+        }
         if (visionOffsetLog == null) {
             visionOffsetLog = new ArrayList<>(varianceHistory);
         }
@@ -600,7 +639,11 @@ public class PhotonFeeder extends ReferenceFeeder {
         }
     }
 
-    /** Use computer vision to find the closest hole in the tape to the camera. */
+    /**
+     * Use computer vision to find the closest hole in the tape to the camera.
+     *
+     * Returns <code>null</code> if no hole was found by the vision pipeline.
+     */
     private Location findClosestHole(Camera camera) throws Exception {
         final Integer pxMaxDistance = (int) VisionUtils.toPixels(getHolePitch(), camera);
         final Integer pxMinDiameter = (int) VisionUtils.toPixels(getHoleDiameterMin(), camera);
@@ -632,8 +675,10 @@ public class PhotonFeeder extends ReferenceFeeder {
 
             // Grab the results
             final List<CvStage.Result.Circle> results = pipeline.getExpectedResult(VisionUtils.PIPELINE_RESULTS_NAME)
-                    .getExpectedListModel(CvStage.Result.Circle.class,
-                            new Exception("Feeder " + getName() + ": No tape holes found."));
+                    .getExpectedListModel(CvStage.Result.Circle.class, null);
+            if (results.isEmpty()) {
+                return null;
+            }
 
             // Return the only hole in the search window.
             final CvStage.Result.Circle closestResult = results.get(0);

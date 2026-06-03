@@ -2,6 +2,8 @@ package org.openpnp.machine.photon.sheets.gui;
 
 import java.awt.Color;
 import java.awt.event.ActionEvent;
+import java.util.HashMap;
+import java.util.Map;
 
 import javax.swing.AbstractAction;
 import javax.swing.Action;
@@ -23,6 +25,7 @@ import org.openpnp.gui.MainFrame;
 import org.openpnp.gui.components.LocationButtonsPanel;
 import org.openpnp.gui.support.AbstractConfigurationWizard;
 import org.openpnp.gui.support.DoubleConverter;
+import org.openpnp.gui.support.Icons;
 import org.openpnp.gui.support.IdentifiableListCellRenderer;
 import org.openpnp.gui.support.IntegerConverter;
 import org.openpnp.gui.support.LengthConverter;
@@ -32,6 +35,7 @@ import org.openpnp.machine.photon.PhotonFeeder;
 import org.openpnp.model.Configuration;
 import org.openpnp.model.Part;
 import org.openpnp.spi.Camera;
+import org.openpnp.util.MovableUtils;
 import org.openpnp.spi.Nozzle;
 import org.openpnp.util.UiUtils;
 import org.openpnp.util.VisionUtils;
@@ -180,6 +184,7 @@ public class FeederConfigurationWizard extends AbstractConfigurationWizard {
 			new ColumnSpec[] {
 				FormSpecs.RELATED_GAP_COLSPEC, FormSpecs.DEFAULT_COLSPEC,
 				FormSpecs.RELATED_GAP_COLSPEC, FormSpecs.DEFAULT_COLSPEC,
+				FormSpecs.RELATED_GAP_COLSPEC, FormSpecs.DEFAULT_COLSPEC,
 			},
 			new RowSpec[] {
 				FormSpecs.RELATED_GAP_ROWSPEC, FormSpecs.DEFAULT_ROWSPEC,
@@ -198,6 +203,9 @@ public class FeederConfigurationWizard extends AbstractConfigurationWizard {
 
 		useVisionCheckbox = new JCheckBox();
 		visionPanel.add(useVisionCheckbox, "4, 2");
+
+		final JButton positionCameraButton = new JButton(positionCameraAction);
+		visionPanel.add(positionCameraButton, "6, 2");
 
 		final JButton editPipelineButton = new JButton(editPipelineAction);
 		visionPanel.add(editPipelineButton, "2, 4");
@@ -420,6 +428,39 @@ public class FeederConfigurationWizard extends AbstractConfigurationWizard {
 		public void actionPerformed(ActionEvent e) {
 			UiUtils.submitUiMachineTask(() -> {
 				feeder.feedOneMm();
+			});
+		}
+	};
+
+	private Action positionCameraAction = new AbstractAction(
+		Translations.getString("LocalButtonsPanel.Action.PositionCamera"),
+		Icons.centerCamera
+	) {
+		{
+			putValue(
+				Action.SHORT_DESCRIPTION,
+				Translations.getString("LocalButtonsPanel.Action.PositionCamera.Description")
+			);
+		}
+
+		@Override
+		public void actionPerformed(ActionEvent arg0) {
+			UiUtils.submitUiMachineTask(() -> {
+				// first, use vision to find the offset
+				feeder.findSlotAddressIfNeeded();
+				feeder.initializeIfNeeded();
+				feeder.updateVisionOffsets(null);
+
+				final Camera camera = Configuration.get()
+					.getMachine()
+					.getDefaultHead()
+					.getDefaultCamera();
+				MovableUtils.moveToLocationAtSafeZ(camera, feeder.getPickLocation());
+				MovableUtils.fireTargetedUserAction(camera);
+
+				Map<String, Object> globals = new HashMap<>();
+				globals.put("camera", camera);
+				Configuration.get().getScripting().on("Camera.AfterPosition", globals);
 			});
 		}
 	};
